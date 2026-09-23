@@ -1,0 +1,526 @@
+import { supabase } from "@/lib/supabase/client";
+
+export type AppProfile = {
+  nickname: string;
+  avatarUrl: string | null;
+};
+
+export type AppMemo = {
+  id: string;
+  date: string;
+  title: string;
+  body: string;
+};
+
+export type AppTodo = {
+  id: string;
+  date: string;
+  text: string;
+  done: boolean;
+  color: string | null;
+  tag: string | null;
+};
+
+export type AppSchedule = {
+  id: string;
+  date: string;
+  title: string;
+  time: string;
+  color: string;
+  isAllDay: boolean;
+};
+
+export type AppChatMessage = {
+  id: number;
+  from: "user" | "ai";
+  text: string;
+};
+
+export type AppChatSummary = {
+  id: string;
+  createdAt: string;
+  conversation: AppChatMessage[];
+  memoTitle: string;
+  memoBody: string;
+  todos: string[];
+};
+
+export type AppData = {
+  profile: AppProfile | null;
+  memos: AppMemo[];
+  todos: AppTodo[];
+  schedules: AppSchedule[];
+  chatSummaries: AppChatSummary[];
+};
+
+export async function upsertProfile(input: {
+  userId: string;
+  nickname: string;
+  avatarUrl?: string | null;
+  provider?: string | null;
+}) {
+  const { error } = await supabase.from("profiles").upsert({
+    user_id: input.userId,
+    nickname: input.nickname,
+    avatar_url: input.avatarUrl ?? null,
+    provider: input.provider ?? "kakao",
+    updated_at: new Date().toISOString(),
+  });
+
+  if (error) {
+    throw error;
+  }
+}
+
+type MemoRow = {
+  id: string;
+  memo_date: string;
+  title: string;
+  body: string;
+};
+
+type TodoRow = {
+  id: string;
+  todo_date: string;
+  text: string;
+  completed: boolean;
+  color: string | null;
+  tag: string | null;
+};
+
+function mapTodoRow(todo: TodoRow): AppTodo {
+  return {
+    id: todo.id,
+    date: todo.todo_date,
+    text: todo.text,
+    done: todo.completed,
+    color: todo.color ?? null,
+    tag: todo.tag ?? null,
+  };
+}
+
+type ScheduleRow = {
+  id: string;
+  schedule_date: string;
+  title: string;
+  start_time: string | null;
+  is_all_day: boolean;
+  color: string;
+};
+
+type ChatSummaryRow = {
+  id: string;
+  conversation: unknown;
+  memo_title: string | null;
+  memo_body: string | null;
+  todos: unknown;
+  created_at: string;
+};
+
+export async function loadAppData(userId: string): Promise<AppData> {
+  const [
+    profileResult,
+    memosResult,
+    todosResult,
+    schedulesResult,
+    chatSummariesResult,
+  ] = await Promise.all([
+      supabase
+        .from("profiles")
+        .select("nickname, avatar_url")
+        .eq("user_id", userId)
+        .maybeSingle(),
+      supabase
+        .from("memos")
+        .select("id, memo_date, title, body")
+        .eq("user_id", userId)
+        .order("memo_date", { ascending: false })
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("todos")
+        .select("id, todo_date, text, completed, color, tag")
+        .eq("user_id", userId)
+        .order("todo_date", { ascending: false })
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("schedules")
+        .select("id, schedule_date, title, start_time, is_all_day, color")
+        .eq("user_id", userId)
+        .order("schedule_date", { ascending: true })
+        .order("start_time", { ascending: true, nullsFirst: false }),
+      supabase
+        .from("chat_summaries")
+        .select("id, conversation, memo_title, memo_body, todos, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false }),
+    ]);
+
+  if (profileResult.error) {
+    throw profileResult.error;
+  }
+  if (memosResult.error) {
+    throw memosResult.error;
+  }
+  if (todosResult.error) {
+    throw todosResult.error;
+  }
+  if (schedulesResult.error) {
+    throw schedulesResult.error;
+  }
+  if (chatSummariesResult.error) {
+    throw chatSummariesResult.error;
+  }
+
+  return {
+    profile: profileResult.data
+      ? {
+          nickname: profileResult.data.nickname,
+          avatarUrl: profileResult.data.avatar_url,
+        }
+      : null,
+    memos: ((memosResult.data ?? []) as MemoRow[]).map((memo) => ({
+      id: memo.id,
+      date: memo.memo_date,
+      title: memo.title,
+      body: memo.body,
+    })),
+    todos: ((todosResult.data ?? []) as TodoRow[]).map(mapTodoRow),
+    schedules: ((schedulesResult.data ?? []) as ScheduleRow[]).map(
+      (schedule) => ({
+        id: schedule.id,
+        date: schedule.schedule_date,
+        title: schedule.title,
+        time: schedule.is_all_day
+          ? "종일"
+          : formatTime(schedule.start_time ?? ""),
+        color: schedule.color,
+        isAllDay: schedule.is_all_day,
+      }),
+    ),
+    chatSummaries: ((chatSummariesResult.data ?? []) as ChatSummaryRow[]).map(
+      mapChatSummaryRow,
+    ),
+  };
+}
+
+export async function createMemo(input: {
+  userId: string;
+  date: string;
+  title: string;
+  body: string;
+  source?: "manual" | "ai";
+}) {
+  const { data, error } = await supabase
+    .from("memos")
+    .insert({
+      user_id: input.userId,
+      memo_date: input.date,
+      title: input.title,
+      body: input.body,
+      source: input.source ?? "manual",
+    })
+    .select("id, memo_date, title, body")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  const memo = data as MemoRow;
+  return {
+    id: memo.id,
+    date: memo.memo_date,
+    title: memo.title,
+    body: memo.body,
+  };
+}
+
+export async function createTodo(input: {
+  userId: string;
+  date: string;
+  text: string;
+  color?: string | null;
+  tag?: string | null;
+  source?: "manual" | "ai";
+}) {
+  const { data, error } = await supabase
+    .from("todos")
+    .insert({
+      user_id: input.userId,
+      todo_date: input.date,
+      text: input.text,
+      color: input.color ?? null,
+      tag: input.tag ?? null,
+      source: input.source ?? "manual",
+    })
+    .select("id, todo_date, text, completed, color, tag")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return mapTodoRow(data as TodoRow);
+}
+
+export async function updateTodoCompleted(input: {
+  id: string;
+  completed: boolean;
+}) {
+  const { error } = await supabase
+    .from("todos")
+    .update({ completed: input.completed })
+    .eq("id", input.id);
+
+  if (error) {
+    throw error;
+  }
+}
+
+export async function updateTodo(input: {
+  id: string;
+  text: string;
+  date: string;
+  color?: string | null;
+  tag?: string | null;
+}) {
+  const { data, error } = await supabase
+    .from("todos")
+    .update({
+      text: input.text,
+      todo_date: input.date,
+      color: input.color ?? null,
+      tag: input.tag ?? null,
+    })
+    .eq("id", input.id)
+    .select("id, todo_date, text, completed, color, tag")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return mapTodoRow(data as TodoRow);
+}
+
+export async function updateMemo(input: {
+  id: string;
+  date: string;
+  title: string;
+  body: string;
+}) {
+  const { data, error } = await supabase
+    .from("memos")
+    .update({
+      memo_date: input.date,
+      title: input.title,
+      body: input.body,
+    })
+    .eq("id", input.id)
+    .select("id, memo_date, title, body")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  const memo = data as MemoRow;
+  return {
+    id: memo.id,
+    date: memo.memo_date,
+    title: memo.title,
+    body: memo.body,
+  };
+}
+
+export async function deleteMemo(id: string) {
+  const { error } = await supabase.from("memos").delete().eq("id", id);
+  if (error) {
+    throw error;
+  }
+}
+
+export async function deleteTodo(id: string) {
+  const { error } = await supabase.from("todos").delete().eq("id", id);
+  if (error) {
+    throw error;
+  }
+}
+
+export async function updateSchedule(input: {
+  id: string;
+  date: string;
+  title: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  isAllDay?: boolean;
+  color?: string;
+  repeatDays?: string[];
+}) {
+  const { data, error } = await supabase
+    .from("schedules")
+    .update({
+      schedule_date: input.date,
+      title: input.title,
+      start_time: input.startTime ?? null,
+      end_time: input.endTime ?? null,
+      is_all_day: input.isAllDay ?? true,
+      color: input.color ?? "#AFA0FF",
+      repeat_days: input.repeatDays ?? [],
+    })
+    .eq("id", input.id)
+    .select("id, schedule_date, title, start_time, is_all_day, color")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  const schedule = data as ScheduleRow;
+  return {
+    id: schedule.id,
+    date: schedule.schedule_date,
+    title: schedule.title,
+    time: schedule.is_all_day ? "종일" : formatTime(schedule.start_time ?? ""),
+    color: schedule.color,
+    isAllDay: schedule.is_all_day,
+  };
+}
+
+export async function deleteSchedule(id: string) {
+  const { error } = await supabase.from("schedules").delete().eq("id", id);
+  if (error) {
+    throw error;
+  }
+}
+
+export async function createSchedule(input: {
+  userId: string;
+  date: string;
+  title: string;
+  startTime?: string | null;
+  endTime?: string | null;
+  isAllDay?: boolean;
+  color?: string;
+  repeatDays?: string[];
+  source?: "manual" | "ai";
+}) {
+  const { data, error } = await supabase
+    .from("schedules")
+    .insert({
+      user_id: input.userId,
+      schedule_date: input.date,
+      title: input.title,
+      start_time: input.startTime ?? null,
+      end_time: input.endTime ?? null,
+      is_all_day: input.isAllDay ?? true,
+      color: input.color ?? "#AFA0FF",
+      repeat_days: input.repeatDays ?? [],
+      source: input.source ?? "manual",
+    })
+    .select("id, schedule_date, title, start_time, is_all_day, color")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  const schedule = data as ScheduleRow;
+  return {
+    id: schedule.id,
+    date: schedule.schedule_date,
+    title: schedule.title,
+    time: schedule.is_all_day ? "종일" : formatTime(schedule.start_time ?? ""),
+    color: schedule.color,
+    isAllDay: schedule.is_all_day,
+  };
+}
+
+export async function createChatSummary(input: {
+  userId: string;
+  conversation: unknown[];
+  memoTitle: string;
+  memoBody: string;
+  todos: string[];
+  scheduleSuggestions: unknown[];
+}): Promise<AppChatSummary> {
+  const { data, error } = await supabase
+    .from("chat_summaries")
+    .insert({
+      user_id: input.userId,
+      conversation: input.conversation,
+      memo_title: input.memoTitle,
+      memo_body: input.memoBody,
+      todos: input.todos,
+      schedule_suggestions: input.scheduleSuggestions,
+    })
+    .select("id, conversation, memo_title, memo_body, todos, created_at")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return mapChatSummaryRow(data as ChatSummaryRow);
+}
+
+function mapChatSummaryRow(row: ChatSummaryRow): AppChatSummary {
+  return {
+    id: row.id,
+    createdAt: row.created_at,
+    conversation: normalizeConversation(row.conversation),
+    memoTitle: row.memo_title ?? "",
+    memoBody: row.memo_body ?? "",
+    todos: Array.isArray(row.todos)
+      ? row.todos.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
+function normalizeConversation(value: unknown): AppChatMessage[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== "object") {
+      return [];
+    }
+
+    const message = item as Record<string, unknown>;
+    const from =
+      message.from === "user" || message.from === "ai"
+        ? message.from
+        : message.role === "user"
+          ? "user"
+          : message.role === "assistant"
+            ? "ai"
+            : null;
+    const text =
+      typeof message.text === "string"
+        ? message.text
+        : typeof message.content === "string"
+          ? message.content
+          : "";
+
+    if (!from || !text.trim()) {
+      return [];
+    }
+
+    return [
+      {
+        id: typeof message.id === "number" ? message.id : index + 1,
+        from,
+        text,
+      },
+    ];
+  });
+}
+
+function formatTime(value: string) {
+  if (!value) {
+    return "시간 미정";
+  }
+
+  return value.slice(0, 5);
+}
